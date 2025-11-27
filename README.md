@@ -8,6 +8,18 @@
 
 Model Context Protocol (MCP) server for Atlassian products (Confluence and Jira). This integration supports both Confluence & Jira Cloud and Server/Data Center deployments.
 
+***
+> [!IMPORTANT]
+> This fork adds Bring Your Own Token (BYOT) OAuth support for Atlassian Data Center
+deployments, so you can supply externally managed OAuth access tokens for on-prem
+instances. To set up BYOT OAuth for Data Center, set into env variables:
+> - `ATLASSIAN_OAUTH_ENABLE=true`
+> - `ATLASSIAN_DATA_CENTER=true`
+
+> The access token should be provided in the `Authorization: Bearer <token>` HTTP header
+when making requests to the MCP server.
+***
+
 ## Example Usage
 
 Ask your AI assistant to:

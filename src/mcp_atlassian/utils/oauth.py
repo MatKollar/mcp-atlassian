@@ -445,13 +445,15 @@ class BYOAccessTokenOAuthConfig:
     This class is used when the user provides their own Atlassian Cloud ID
     and access token directly, bypassing the full OAuth 2.0 (3LO) flow.
     It's suitable for scenarios like service accounts or CI/CD pipelines
-    where an access token is already available.
+    where an access token is already available, or Data Center environments
+    where tokens are supplied per-request via headers.
 
     This configuration does not support token refreshing.
     """
 
-    cloud_id: str
-    access_token: str
+    cloud_id: str | None
+    access_token: str | None
+    data_center: bool = False
     refresh_token: None = None
     expires_at: None = None
 
@@ -459,7 +461,9 @@ class BYOAccessTokenOAuthConfig:
     def from_env(cls) -> Optional["BYOAccessTokenOAuthConfig"]:
         """Create a BYOAccessTokenOAuthConfig from environment variables.
 
-        Reads `ATLASSIAN_OAUTH_CLOUD_ID` and `ATLASSIAN_OAUTH_ACCESS_TOKEN`.
+        Reads `ATLASSIAN_OAUTH_ACCESS_TOKEN` and optional `ATLASSIAN_OAUTH_CLOUD_ID`.
+        When `ATLASSIAN_DATA_CENTER` is true, cloud_id/access_token can be
+        omitted so that tokens can be supplied via Authorization headers.
 
         Returns:
             BYOAccessTokenOAuthConfig instance or None if required
@@ -467,11 +471,26 @@ class BYOAccessTokenOAuthConfig:
         """
         cloud_id = os.getenv("ATLASSIAN_OAUTH_CLOUD_ID")
         access_token = os.getenv("ATLASSIAN_OAUTH_ACCESS_TOKEN")
+        data_center_enabled = os.getenv("ATLASSIAN_DATA_CENTER")
 
-        if not all([cloud_id, access_token]):
+        # Allow creation when only access_token is present (suitable for Jira Server/DC BYOT).
+        if not access_token:
+            if data_center_enabled:
+                return cls(
+                    cloud_id=cloud_id,
+                    access_token=None,
+                    data_center=True,
+                )
             return None
 
-        return cls(cloud_id=cloud_id, access_token=access_token)
+        if not cloud_id and not data_center_enabled:
+            return None
+
+        return cls(
+            cloud_id=cloud_id,
+            access_token=access_token,
+            data_center=data_center_enabled,
+        )
 
 
 def get_oauth_config_from_env() -> OAuthConfig | BYOAccessTokenOAuthConfig | None:
@@ -508,6 +527,24 @@ def configure_oauth_session(
         f"refresh_token_present={bool(oauth_config.refresh_token)}, "
         f"cloud_id='{oauth_config.cloud_id}'"
     )
+    if isinstance(oauth_config, BYOAccessTokenOAuthConfig):
+        if oauth_config.access_token:
+            session.headers["Authorization"] = f"Bearer {oauth_config.access_token}"
+            logger.info(
+                "configure_oauth_session: Using provided OAuth access token directly (no refresh_token)."
+            )
+            return True
+        if oauth_config.data_center is True:
+            logger.info(
+                "configure_oauth_session: Data Center BYOT config without env token; "
+                "expecting Authorization header tokens."
+            )
+            return True
+        logger.error(
+            "configure_oauth_session: oauth access token configuration provided as empty string."
+        )
+        return False
+
     # If user provided only an access token (no refresh_token), use it directly
     if oauth_config.access_token and not oauth_config.refresh_token:
         logger.info(
@@ -517,11 +554,6 @@ def configure_oauth_session(
         return True
     logger.debug("configure_oauth_session: Proceeding to ensure_valid_token.")
     # Otherwise, ensure we have a valid token (refresh if needed)
-    if isinstance(oauth_config, BYOAccessTokenOAuthConfig):
-        logger.error(
-            "configure_oauth_session: oauth access token configuration provided as empty string."
-        )
-        return False
     if not oauth_config.ensure_valid_token():
         logger.error(
             f"configure_oauth_session: ensure_valid_token returned False. "

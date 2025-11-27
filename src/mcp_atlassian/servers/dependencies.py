@@ -16,7 +16,7 @@ from starlette.requests import Request
 from mcp_atlassian.confluence import ConfluenceConfig, ConfluenceFetcher
 from mcp_atlassian.jira import JiraConfig, JiraFetcher
 from mcp_atlassian.servers.context import MainAppContext
-from mcp_atlassian.utils.oauth import OAuthConfig
+from mcp_atlassian.utils.oauth import BYOAccessTokenOAuthConfig, OAuthConfig
 
 if TYPE_CHECKING:
     from mcp_atlassian.confluence.config import (
@@ -75,35 +75,47 @@ def _create_user_config_for_fetcher(
             raise ValueError(
                 "OAuth access token missing in credentials for user auth_type 'oauth'"
             )
-        if (
-            not base_config
-            or not hasattr(base_config, "oauth_config")
-            or not getattr(base_config, "oauth_config", None)
-        ):
-            raise ValueError(
-                f"Global OAuth config for {type(base_config).__name__} is missing, "
-                "but user auth_type is 'oauth'."
-            )
-        global_oauth_cfg = base_config.oauth_config
+        # For Jira Server/Data Center BYOT, allow proceeding without global OAuth config.
+        # For Cloud, still expect a global oauth_config to supply cloud_id unless header provided.
+        global_oauth_cfg = getattr(base_config, "oauth_config", None)
+        global_cloud_id = (
+            getattr(global_oauth_cfg, "cloud_id", None) if global_oauth_cfg else None
+        )
+        byo_data_center = (
+            isinstance(global_oauth_cfg, BYOAccessTokenOAuthConfig)
+            and global_oauth_cfg.data_center is True
+        )
 
         # Use provided cloud_id or fall back to global config cloud_id
-        effective_cloud_id = cloud_id if cloud_id else global_oauth_cfg.cloud_id
-        if not effective_cloud_id:
+        effective_cloud_id = cloud_id if cloud_id else global_cloud_id
+        # For Server/Data Center BYOT OAuth, allow missing cloud_id and use base URL.
+        require_cloud_id = True
+        if not base_config.is_cloud or byo_data_center:
+            require_cloud_id = False
+
+        if require_cloud_id and not effective_cloud_id:
             raise ValueError(
                 "Cloud ID is required for OAuth authentication. "
                 "Provide it via X-Atlassian-Cloud-Id header or configure it globally."
             )
 
-        # For minimal OAuth config (user-provided tokens), use empty strings for client credentials
+        # Build a minimal OAuth config for the user token. If a global config exists, use its
+        # values where available; otherwise, use empty strings (suitable for BYOT on DC).
+        client_id = ""
+        client_secret = ""
+        redirect_uri = ""
+        scope = ""
+        if isinstance(global_oauth_cfg, OAuthConfig):
+            client_id = global_oauth_cfg.client_id or ""
+            client_secret = global_oauth_cfg.client_secret or ""
+            redirect_uri = global_oauth_cfg.redirect_uri or ""
+            scope = global_oauth_cfg.scope or ""
+
         oauth_config_for_user = OAuthConfig(
-            client_id=global_oauth_cfg.client_id if global_oauth_cfg.client_id else "",
-            client_secret=global_oauth_cfg.client_secret
-            if global_oauth_cfg.client_secret
-            else "",
-            redirect_uri=global_oauth_cfg.redirect_uri
-            if global_oauth_cfg.redirect_uri
-            else "",
-            scope=global_oauth_cfg.scope if global_oauth_cfg.scope else "",
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scope=scope,
             access_token=user_access_token,
             refresh_token=None,
             expires_at=None,
@@ -169,27 +181,28 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
     logger.debug(f"get_jira_fetcher: ENTERED. Context ID: {id(ctx)}")
     try:
         request: Request = get_http_request()
+        request_state = getattr(ctx.request_context.request, "state", None)
         logger.debug(
             f"get_jira_fetcher: In HTTP request context. Request URL: {request.url}. "
-            f"State.jira_fetcher exists: {hasattr(request.state, 'jira_fetcher') and request.state.jira_fetcher is not None}. "
-            f"State.user_auth_type: {getattr(request.state, 'user_atlassian_auth_type', 'N/A')}. "
-            f"State.user_token_present: {hasattr(request.state, 'user_atlassian_token') and request.state.user_atlassian_token is not None}."
+            f"State.jira_fetcher exists: {hasattr(request_state, 'jira_fetcher') and request_state.jira_fetcher is not None}. "
+            f"State.user_auth_type: {getattr(request_state, 'user_atlassian_auth_type', 'N/A')}. "
+            f"State.user_token_present: {hasattr(request_state, 'user_atlassian_token') and request_state.user_atlassian_token is not None}."
         )
-        # Use fetcher from request.state if already present
-        if hasattr(request.state, "jira_fetcher") and request.state.jira_fetcher:
-            logger.debug("get_jira_fetcher: Returning JiraFetcher from request.state.")
-            return request.state.jira_fetcher
-        user_auth_type = getattr(request.state, "user_atlassian_auth_type", None)
+        # Use fetcher from request_state if already present
+        if hasattr(request_state, "jira_fetcher") and request_state.jira_fetcher:
+            logger.debug("get_jira_fetcher: Returning JiraFetcher from request_state.")
+            return request_state.jira_fetcher
+        user_auth_type = getattr(request_state, "user_atlassian_auth_type", None)
         logger.debug(f"get_jira_fetcher: User auth type: {user_auth_type}")
         # If OAuth or PAT token is present, create user-specific fetcher
         if user_auth_type in ["oauth", "pat"] and hasattr(
-            request.state, "user_atlassian_token"
+            request_state, "user_atlassian_token"
         ):
-            user_token = getattr(request.state, "user_atlassian_token", None)
+            user_token = getattr(request_state, "user_atlassian_token", None)
             user_email = getattr(
-                request.state, "user_atlassian_email", None
+                request_state, "user_atlassian_email", None
             )  # May be None for PAT
-            user_cloud_id = getattr(request.state, "user_atlassian_cloud_id", None)
+            user_cloud_id = getattr(request_state, "user_atlassian_cloud_id", None)
 
             if not user_token:
                 raise ValueError("User Atlassian token found in state but is empty.")
@@ -225,7 +238,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                 logger.debug(
                     f"get_jira_fetcher: Validated Jira token for user ID: {current_user_id}"
                 )
-                request.state.jira_fetcher = user_jira_fetcher
+                request_state.jira_fetcher = user_jira_fetcher
                 return user_jira_fetcher
             except Exception as e:
                 logger.error(
@@ -235,7 +248,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                 raise ValueError(f"Invalid user Jira token or configuration: {e}")
         else:
             logger.debug(
-                f"get_jira_fetcher: No user-specific JiraFetcher. Auth type: {user_auth_type}. Token present: {hasattr(request.state, 'user_atlassian_token')}. Will use global fallback."
+                f"get_jira_fetcher: No user-specific JiraFetcher. Auth type: {user_auth_type}. Token present: {hasattr(request_state, 'user_atlassian_token')}. Will use global fallback."
             )
     except RuntimeError:
         logger.debug(
@@ -275,28 +288,29 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
     logger.debug(f"get_confluence_fetcher: ENTERED. Context ID: {id(ctx)}")
     try:
         request: Request = get_http_request()
+        request_state = getattr(ctx.request_context.request, "state", None)
         logger.debug(
             f"get_confluence_fetcher: In HTTP request context. Request URL: {request.url}. "
-            f"State.confluence_fetcher exists: {hasattr(request.state, 'confluence_fetcher') and request.state.confluence_fetcher is not None}. "
-            f"State.user_auth_type: {getattr(request.state, 'user_atlassian_auth_type', 'N/A')}. "
-            f"State.user_token_present: {hasattr(request.state, 'user_atlassian_token') and request.state.user_atlassian_token is not None}."
+            f"State.confluence_fetcher exists: {hasattr(request_state, 'confluence_fetcher') and request_state.confluence_fetcher is not None}. "
+            f"State.user_auth_type: {getattr(request_state, 'user_atlassian_auth_type', 'N/A')}. "
+            f"State.user_token_present: {hasattr(request_state, 'user_atlassian_token') and request_state.user_atlassian_token is not None}."
         )
         if (
-            hasattr(request.state, "confluence_fetcher")
-            and request.state.confluence_fetcher
+            hasattr(request_state, "confluence_fetcher")
+            and request_state.confluence_fetcher
         ):
             logger.debug(
-                "get_confluence_fetcher: Returning ConfluenceFetcher from request.state."
+                "get_confluence_fetcher: Returning ConfluenceFetcher from request_state."
             )
-            return request.state.confluence_fetcher
-        user_auth_type = getattr(request.state, "user_atlassian_auth_type", None)
+            return request_state.confluence_fetcher
+        user_auth_type = getattr(request_state, "user_atlassian_auth_type", None)
         logger.debug(f"get_confluence_fetcher: User auth type: {user_auth_type}")
         if user_auth_type in ["oauth", "pat"] and hasattr(
-            request.state, "user_atlassian_token"
+            request_state, "user_atlassian_token"
         ):
-            user_token = getattr(request.state, "user_atlassian_token", None)
-            user_email = getattr(request.state, "user_atlassian_email", None)
-            user_cloud_id = getattr(request.state, "user_atlassian_cloud_id", None)
+            user_token = getattr(request_state, "user_atlassian_token", None)
+            user_email = getattr(request_state, "user_atlassian_email", None)
+            user_cloud_id = getattr(request_state, "user_atlassian_cloud_id", None)
 
             if not user_token:
                 raise ValueError("User Atlassian token found in state but is empty.")
@@ -343,7 +357,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 logger.debug(
                     f"get_confluence_fetcher: Validated Confluence token. User context: Email='{user_email or derived_email}', DisplayName='{display_name}'"
                 )
-                request.state.confluence_fetcher = user_confluence_fetcher
+                request_state.confluence_fetcher = user_confluence_fetcher
                 if (
                     not user_email
                     and derived_email
@@ -351,7 +365,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                     and isinstance(current_user_data, dict)
                     and current_user_data.get("email")
                 ):
-                    request.state.user_atlassian_email = current_user_data["email"]
+                    request_state.user_atlassian_email = current_user_data["email"]
                 return user_confluence_fetcher
             except Exception as e:
                 logger.error(
@@ -360,7 +374,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 raise ValueError(f"Invalid user Confluence token or configuration: {e}")
         else:
             logger.debug(
-                f"get_confluence_fetcher: No user-specific ConfluenceFetcher. Auth type: {user_auth_type}. Token present: {hasattr(request.state, 'user_atlassian_token')}. Will use global fallback."
+                f"get_confluence_fetcher: No user-specific ConfluenceFetcher. Auth type: {user_auth_type}. Token present: {hasattr(request_state, 'user_atlassian_token')}. Will use global fallback."
             )
     except RuntimeError:
         logger.debug(

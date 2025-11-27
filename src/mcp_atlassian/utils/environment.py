@@ -10,6 +10,7 @@ logger = logging.getLogger("mcp-atlassian.utils.environment")
 
 def get_available_services() -> dict[str, bool | None]:
     """Determine which services are available based on environment variables."""
+    data_center_enabled = os.getenv("ATLASSIAN_DATA_CENTER")
     confluence_url = os.getenv("CONFLUENCE_URL")
     confluence_is_setup = False
     if confluence_url:
@@ -41,6 +42,12 @@ def get_available_services() -> dict[str, bool | None]:
             logger.info(
                 "Using Confluence OAuth 2.0 (3LO) authentication (Cloud-only features) "
                 "with provided access token"
+            )
+        elif data_center_enabled and not is_cloud:
+            confluence_is_setup = True
+            logger.info(
+                "Using Confluence Data Center OAuth (BYOT) with tokens provided via "
+                "Authorization headers"
             )
         elif is_cloud:  # Cloud non-OAuth
             if all(
@@ -94,6 +101,12 @@ def get_available_services() -> dict[str, bool | None]:
             logger.info(
                 "Using Jira OAuth 2.0 (3LO) authentication (Cloud-only features) "
                 "with provided access token"
+            )
+        elif data_center_enabled and not is_cloud:
+            jira_is_setup = True
+            logger.info(
+                "Using Jira Data Center OAuth (BYOT) with tokens provided via "
+                "Authorization headers"
             )
         elif is_cloud:  # Cloud non-OAuth
             if all(

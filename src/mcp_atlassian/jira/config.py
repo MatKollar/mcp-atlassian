@@ -176,7 +176,21 @@ class JiraConfig:
                         return True
                 # Bring Your Own Access Token mode
                 elif isinstance(self.oauth_config, BYOAccessTokenOAuthConfig):
-                    if self.oauth_config.cloud_id and self.oauth_config.access_token:
+                    byo_data_center = (
+                        getattr(self.oauth_config, "data_center", False) is True
+                    )
+                    if self.oauth_config.access_token and (
+                        self.oauth_config.cloud_id
+                        or not self.is_cloud
+                        or byo_data_center
+                    ):
+                        return True
+                    # Accept BYO tokens without cloud_id for Server/Data Center usage
+                    if byo_data_center and not self.is_cloud:
+                        logger.debug(
+                            "BYO OAuth Data Center config detected - expecting "
+                            "user-provided tokens via headers"
+                        )
                         return True
 
             # Partial configuration is invalid

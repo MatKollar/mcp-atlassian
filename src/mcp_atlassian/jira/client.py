@@ -47,8 +47,11 @@ class JiraClient:
 
         # Initialize the Jira client based on auth type
         if self.config.auth_type == "oauth":
-            if not self.config.oauth_config or not self.config.oauth_config.cloud_id:
-                error_msg = "OAuth authentication requires a valid cloud_id"
+            # Support two modes:
+            #  - Cloud OAuth (requires cloud_id and uses api.atlassian.com)
+            #  - BYOT OAuth for Server/Data Center (no cloud_id; use base URL)
+            if not self.config.oauth_config:
+                error_msg = "OAuth authentication requires oauth_config to be set"
                 raise ValueError(error_msg)
 
             # Create a session for OAuth
@@ -59,18 +62,32 @@ class JiraClient:
                 error_msg = "Failed to configure OAuth session"
                 raise MCPAtlassianAuthenticationError(error_msg)
 
-            # The Jira API URL with OAuth is different
-            api_url = (
-                f"https://api.atlassian.com/ex/jira/{self.config.oauth_config.cloud_id}"
-            )
-
-            # Initialize Jira with the session
-            self.jira = Jira(
-                url=api_url,
-                session=session,
-                cloud=True,  # OAuth is only for Cloud
-                verify_ssl=self.config.ssl_verify,
-            )
+            if self.config.oauth_config.cloud_id:
+                # Cloud: use the Atlassian API gateway URL
+                api_url = (
+                    f"https://api.atlassian.com/ex/jira/{self.config.oauth_config.cloud_id}"
+                )
+                logger.debug(
+                    "Initializing Jira client for Cloud OAuth using api.atlassian.com"
+                )
+                self.jira = Jira(
+                    url=api_url,
+                    session=session,
+                    cloud=True,
+                    verify_ssl=self.config.ssl_verify,
+                )
+            else:
+                # Server/Data Center: use provided base URL and forward Bearer token
+                logger.debug(
+                    "Initializing Jira client for Server/Data Center with BYOT OAuth token. "
+                    f"URL: {self.config.url}, SSL Verify: {self.config.ssl_verify}"
+                )
+                self.jira = Jira(
+                    url=self.config.url,
+                    session=session,
+                    cloud=self.config.is_cloud,
+                    verify_ssl=self.config.ssl_verify,
+                )
         elif self.config.auth_type == "pat":
             logger.debug(
                 f"Initializing Jira client with Token (PAT) auth. "

@@ -34,8 +34,11 @@ class ConfluenceClient:
 
         # Initialize the Confluence client based on auth type
         if self.config.auth_type == "oauth":
-            if not self.config.oauth_config or not self.config.oauth_config.cloud_id:
-                error_msg = "OAuth authentication requires a valid cloud_id"
+            # Support two modes:
+            #  - Cloud OAuth (requires cloud_id and uses api.atlassian.com)
+            #  - BYOT OAuth for Server/Data Center (no cloud_id; use base URL)
+            if not self.config.oauth_config:
+                error_msg = "OAuth authentication requires oauth_config to be set"
                 raise ValueError(error_msg)
 
             # Create a session for OAuth
@@ -46,16 +49,30 @@ class ConfluenceClient:
                 error_msg = "Failed to configure OAuth session"
                 raise MCPAtlassianAuthenticationError(error_msg)
 
-            # The Confluence API URL with OAuth is different
-            api_url = f"https://api.atlassian.com/ex/confluence/{self.config.oauth_config.cloud_id}"
-
-            # Initialize Confluence with the session
-            self.confluence = Confluence(
-                url=api_url,
-                session=session,
-                cloud=True,  # OAuth is only for Cloud
-                verify_ssl=self.config.ssl_verify,
-            )
+            if self.config.oauth_config.cloud_id:
+                # Cloud: The Confluence API URL with OAuth is different
+                api_url = f"https://api.atlassian.com/ex/confluence/{self.config.oauth_config.cloud_id}"
+                logger.debug(
+                    "Initializing Confluence client for Cloud OAuth using api.atlassian.com"
+                )
+                self.confluence = Confluence(
+                    url=api_url,
+                    session=session,
+                    cloud=True,  # OAuth is only for Cloud
+                    verify_ssl=self.config.ssl_verify,
+                )
+            else:
+                # Server/Data Center with BYOT OAuth
+                logger.debug(
+                    f"Initializing Confluence client for Server/Data Center OAuth. "
+                    f"URL: {self.config.url}"
+                )
+                self.confluence = Confluence(
+                    url=self.config.url,
+                    session=session,
+                    cloud=False,
+                    verify_ssl=self.config.ssl_verify,
+                )
         elif self.config.auth_type == "pat":
             logger.debug(
                 f"Initializing Confluence client with Token (PAT) auth. "
